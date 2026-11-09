@@ -1,0 +1,775 @@
+package dev.railroadide.railroad.formatter;
+
+import com.sun.source.tree.BlockTree;
+import com.sun.source.tree.CatchTree;
+import com.sun.source.tree.CompilationUnitTree;
+import com.sun.source.tree.DoWhileLoopTree;
+import com.sun.source.tree.EnhancedForLoopTree;
+import com.sun.source.tree.ForLoopTree;
+import com.sun.source.tree.IdentifierTree;
+import com.sun.source.tree.IfTree;
+import com.sun.source.tree.LambdaExpressionTree;
+import com.sun.source.tree.StatementTree;
+import com.sun.source.tree.Tree;
+import com.sun.source.tree.TryTree;
+import com.sun.source.tree.VariableTree;
+import com.sun.source.tree.WhileLoopTree;
+import com.sun.source.util.JavacTask;
+import com.sun.source.util.SourcePositions;
+import com.sun.source.util.TreePathScanner;
+import com.sun.source.util.TreeScanner;
+import com.sun.source.util.Trees;
+
+import javax.tools.Diagnostic;
+import javax.tools.DiagnosticCollector;
+import javax.tools.JavaCompiler;
+import javax.tools.JavaFileObject;
+import javax.tools.SimpleJavaFileObject;
+import javax.tools.ToolProvider;
+import java.io.IOException;
+import java.net.URI;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Comparator;
+import java.util.HashSet;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Locale;
+import java.util.Map;
+import java.util.Set;
+import java.util.stream.Stream;
+import javax.tools.StandardJavaFileManager;
+import com.sun.source.util.TreePath;
+import javax.lang.model.element.Element;
+
+/**
+ * Applies Railroad's structural Java style rules before the whitespace formatter runs.
+ *
+ * <p>
+ * The JDK compiler tree API is used deliberately: style rules operate on Java statements rather than text and
+ * automatically understand the same language level as the project toolchain. Qualified type names are shortened only
+ * after javac attribution identifies their symbols and checks for name conflicts.
+ * </p>
+ */
+public final class RailroadJavaStyle {
+    private static final List<String> JAVAC_OPTIONS = List.of("-proc:none", "--release",
+        System.getProperty("railroad.quality.release", Integer.toString(Runtime.version().feature())));
+
+    private RailroadJavaStyle() {
+    }
+
+    public static void main(String[] args) throws IOException {
+        if (args.length < 2 || !("--apply".equals(args[0]) || "--check".equals(args[0]))) {
+            printUsageAndExit();
+        }
+
+        int pathStart;
+        Path repository = null;
+        String ratchetFrom = null;
+        if ("--all".equals(args[1])) {
+            pathStart = 2;
+        } else if (args.length >= 5 && "--ratchet-from".equals(args[1])) {
+            ratchetFrom = args[2];
+            repository = Path.of(args[3]).toAbsolutePath().normalize();
+            pathStart = 4;
+        } else {
+            printUsageAndExit();
+            return;
+        }
+
+        List<String> compilerOptions = new ArrayList<>(JAVAC_OPTIONS);
+        String classpathFile = System.getenv("RAILROAD_FORMAT_CLASSPATH_FILE");
+        if (classpathFile != null) {
+            compilerOptions
+                .addAll(List.of("--class-path", Files.readString(Path.of(classpathFile), StandardCharsets.UTF_8)));
+        }
+
+        while (pathStart + 1 < args.length
+            && ("--class-path".equals(args[pathStart]) || "--source-path".equals(args[pathStart]))) {
+            compilerOptions.add(args[pathStart++]);
+            compilerOptions.add(args[pathStart++]);
+        }
+
+        if (pathStart >= args.length || (args[pathStart].startsWith("--") && !"--files-from".equals(args[pathStart]))) {
+            printUsageAndExit();
+            return;
+        }
+
+        boolean checkOnly = "--check".equals(args[0]);
+        List<Path> files;
+        if ("--files-from".equals(args[pathStart]) && pathStart + 1 < args.length) {
+            files = Files.readAllLines(Path.of(args[pathStart + 1]), StandardCharsets.UTF_8).stream()
+                .filter(line -> !line.isBlank()).map(Path::of).distinct().sorted().toList();
+        } else {
+            files = collectJavaFiles(args, pathStart);
+        }
+
+        if (ratchetFrom != null) {
+            files = retainChangedFiles(files, repository, ratchetFrom);
+        }
+
+        int changedFiles = 0;
+        int visibilityViolations = 0;
+        int varViolations = 0;
+
+        Map<URI, String> sources = new LinkedHashMap<>();
+        for (Path file : files) {
+            sources.put(file.toUri(), Files.readString(file, StandardCharsets.UTF_8));
+        }
+
+        Map<URI, RewriteResult> results = rewrite(sources, compilerOptions);
+        for (Path file : files) {
+            String source = sources.get(file.toUri());
+            RewriteResult result = results.get(file.toUri());
+            for (LocalVariableStyle.Violation violation : result.varViolations()) {
+                System.err.printf("%s:%d: %s%n", file, violation.line(), violation.message());
+                varViolations++;
+            }
+
+            for (ExplicitVisibilityStyle.Violation violation : result.visibilityViolations()) {
+                System.err.printf("%s:%d: %s%n", file, violation.line(), violation.message());
+                visibilityViolations++;
+            }
+
+            if (result.source().equals(source))
+                continue;
+
+            changedFiles++;
+            if (checkOnly) {
+                for (int line : result.changedLines()) {
+                    System.err.printf("%s:%d: Java source violates semantic formatting rules%n", file, line);
+                }
+            } else {
+                Files.writeString(file, result.source(), StandardCharsets.UTF_8);
+                System.out.println("Formatted " + file);
+            }
+        }
+
+        if (checkOnly && changedFiles > 0) {
+            System.err.printf(Locale.ROOT, "%d Java file%s require structural formatting. Run './gradlew format'.%n",
+                changedFiles, changedFiles == 1 ? "" : "s");
+        }
+
+        if (visibilityViolations > 0) {
+            System.err.printf(Locale.ROOT, "%d package-private declaration%s require an explicit access modifier. "
+                + "Choose visibility manually; format does not change access levels.%n",
+                visibilityViolations, visibilityViolations == 1 ? "" : "s");
+        }
+
+        if (checkOnly && (changedFiles > 0 || visibilityViolations > 0 || varViolations > 0)) {
+            System.exit(1);
+        }
+    }
+
+    private static void printUsageAndExit() {
+        System.err.println("Usage: RailroadJavaStyle (--apply|--check) "
+            + "(--all|--ratchet-from <revision> <repository>) "
+            + "[--class-path <classpath>] [--source-path <sourcepath>] "
+            + "(<file-or-directory>...|--files-from <manifest>)");
+        System.exit(2);
+    }
+
+    public static String rewrite(String source) {
+        URI uri = URI.create("string:///RailroadStyleInput.java");
+        return rewrite(Map.of(uri, source), JAVAC_OPTIONS).get(uri).source();
+    }
+
+    private static Map<URI, RewriteResult> rewrite(Map<URI, String> sources, List<String> compilerOptions) {
+        return finishSemanticFormatting(rewrite(sources, compilerOptions, true), compilerOptions);
+    }
+
+    private static Map<URI, RewriteResult> finishSemanticFormatting(
+        Map<URI, RewriteResult> results,
+        List<String> compilerOptions
+    ) {
+        if (results.isEmpty())
+            return results;
+
+        JavaCompiler compiler = ToolProvider.getSystemJavaCompiler();
+        DiagnosticCollector<JavaFileObject> diagnostics = new DiagnosticCollector<>();
+        List<SourceFile> inputs = results.entrySet().stream()
+            .map(entry -> new SourceFile(entry.getKey(), entry.getValue().source())).toList();
+        List<String> analysisOptions = new ArrayList<>(compilerOptions);
+        // OpenJDK's analyzer speculatively attributes diamond and compares its inferred arguments.
+        analysisOptions.addAll(List.of("-XDfind=diamond", "-Xmaxwarns", Integer.toString(Integer.MAX_VALUE)));
+        try (StandardJavaFileManager fileManager = compiler.getStandardFileManager(diagnostics, Locale.ROOT,
+            StandardCharsets.UTF_8)) {
+            JavacTask task = (JavacTask) compiler.getTask(null, fileManager, diagnostics, analysisOptions, null,
+                inputs);
+            List<CompilationUnitTree> units = new ArrayList<>();
+            task.parse().forEach(units::add);
+            failOnParseErrors(diagnostics);
+            SourcePositions positions = Trees.instance(task).getSourcePositions();
+            Map<CompilationUnitTree, List<TextEdit>> unitEdits = new LinkedHashMap<>();
+            Map<CompilationUnitTree, List<Integer>> unitLines = new LinkedHashMap<>();
+            Map<CompilationUnitTree, DiamondStyle> diamonds = new LinkedHashMap<>();
+            for (CompilationUnitTree unit : units) {
+                URI uri = unit.getSourceFile().toUri();
+                RewriteResult result = results.get(uri);
+                List<TextEdit> edits = new ArrayList<>();
+                List<Integer> lines = new ArrayList<>(result.changedLines());
+                new TerminalStatementSpacing(unit, positions, result.source(), edits, lines).scan(unit, null);
+                unitEdits.put(unit, edits);
+                unitLines.put(unit, lines);
+                diamonds.put(unit, new DiamondStyle(unit, positions, result.source()));
+            }
+
+            if (diamonds.values().stream().anyMatch(DiamondStyle::hasCandidates)) {
+                task.analyze();
+            }
+
+            for (CompilationUnitTree unit : units) {
+                URI uri = unit.getSourceFile().toUri();
+                RewriteResult result = results.get(uri);
+                List<TextEdit> edits = unitEdits.get(unit);
+                List<Integer> lines = unitLines.get(unit);
+                diamonds.get(unit).addEdits(diagnostics.getDiagnostics(), edits, lines);
+                edits.sort(Comparator.comparingInt(TextEdit::start).reversed());
+                var rewritten = new StringBuilder(result.source());
+                for (TextEdit edit : edits) {
+                    rewritten.replace(edit.start(), edit.end(), edit.replacement());
+                }
+
+                lines.sort(Integer::compareTo);
+                results.put(uri, new RewriteResult(rewritten.toString(), List.copyOf(lines),
+                    result.visibilityViolations(), result.varViolations()));
+            }
+
+            return results;
+        } catch (IOException exception) {
+            throw new IllegalStateException("Unable to finish semantic Java formatting", exception);
+        }
+    }
+
+    private static Map<URI, RewriteResult> rewrite(
+        Map<URI, String> sources,
+        List<String> compilerOptions,
+        boolean shortenInferredTypes
+    ) {
+        if (sources.isEmpty())
+            return Map.of();
+
+        JavaCompiler compiler = ToolProvider.getSystemJavaCompiler();
+        if (compiler == null)
+            throw new IllegalStateException("A full JDK is required to run Railroad's Java formatter");
+
+        DiagnosticCollector<JavaFileObject> diagnostics = new DiagnosticCollector<>();
+        List<SourceFile> inputs = sources.entrySet().stream()
+            .map(entry -> new SourceFile(entry.getKey(), entry.getValue())).toList();
+        try (StandardJavaFileManager fileManager = compiler.getStandardFileManager(diagnostics, Locale.ROOT,
+            StandardCharsets.UTF_8)) {
+            JavacTask task = (JavacTask) compiler.getTask(null, fileManager, diagnostics, compilerOptions, null,
+                inputs);
+            List<CompilationUnitTree> units = new ArrayList<>();
+            task.parse().forEach(units::add);
+            failOnParseErrors(diagnostics);
+
+            Trees trees = Trees.instance(task);
+            SourcePositions positions = trees.getSourcePositions();
+            Map<CompilationUnitTree, List<TextEdit>> unitEdits = new LinkedHashMap<>();
+            Map<CompilationUnitTree, List<Integer>> unitLines = new LinkedHashMap<>();
+            Map<CompilationUnitTree, QualifiedNameStyle> qualifiedNames = new LinkedHashMap<>();
+            Map<CompilationUnitTree, LocalVariableStyle> localVariables = new LinkedHashMap<>();
+            Map<CompilationUnitTree, CollectionTypeStyle> collections = new LinkedHashMap<>();
+            Map<CompilationUnitTree, List<ExplicitVisibilityStyle.Violation>> visibilityViolations = new LinkedHashMap<>();
+            for (CompilationUnitTree unit : units) {
+                String source = sources.get(unit.getSourceFile().toUri());
+                List<TextEdit> edits = new ArrayList<>();
+                List<Integer> changedLines = new ArrayList<>();
+                new SemanticStyleScanner(unit, positions, source, edits, changedLines).scan(unit, null);
+                unitEdits.put(unit, edits);
+                unitLines.put(unit, changedLines);
+                qualifiedNames.put(unit, new QualifiedNameStyle(unit, trees, source));
+                localVariables.put(unit, new LocalVariableStyle(unit, trees, source));
+                collections.put(unit, new CollectionTypeStyle(unit, trees, source));
+                visibilityViolations.put(unit, ExplicitVisibilityStyle.inspect(unit, positions));
+            }
+
+            // Attribution may report unrelated errors (including missing generated Lombok members).
+            // Semantic type rules only use successfully resolved symbols; parsing must still succeed.
+
+            if (qualifiedNames.values().stream().anyMatch(QualifiedNameStyle::hasCandidates)
+                || localVariables.values().stream().anyMatch(LocalVariableStyle::hasCandidates)
+                || collections.values().stream().anyMatch(CollectionTypeStyle::hasCandidates)) {
+                task.analyze();
+            }
+
+            Map<Element, List<TreePath>> references = CollectionTypeStyle.references(units, trees);
+            CollectionTypeStyle.plan(List.copyOf(collections.values()), task.getElements(), task.getTypes(),
+                references);
+
+            Map<URI, RewriteResult> results = new LinkedHashMap<>();
+            for (CompilationUnitTree unit : units) {
+                URI uri = unit.getSourceFile().toUri();
+                List<TextEdit> edits = unitEdits.get(unit);
+                List<Integer> changedLines = unitLines.get(unit);
+                localVariables.get(unit).addEdits(task.getElements(), task.getTypes(), collections.get(unit), edits,
+                    changedLines);
+                collections.get(unit).addEdits(localVariables.get(unit), edits, changedLines);
+                qualifiedNames.get(unit).addEdits(task.getElements(), edits, changedLines);
+                edits.sort(Comparator.<TextEdit>comparingInt(TextEdit::start).reversed()
+                    .thenComparing(Comparator.comparingInt(TextEdit::end).reversed()));
+                var rewritten = new StringBuilder(sources.get(uri));
+                for (TextEdit edit : edits) {
+                    rewritten.replace(edit.start(), edit.end(), edit.replacement());
+                }
+
+                changedLines.sort(Integer::compareTo);
+                results.put(uri, new RewriteResult(rewritten.toString(), List.copyOf(changedLines),
+                    visibilityViolations.get(unit), localVariables.get(unit).violations()));
+            }
+
+            if (shortenInferredTypes && (localVariables.values().stream().anyMatch(LocalVariableStyle::expandedTypes)
+                || collections.values().stream().anyMatch(CollectionTypeStyle::changedTypes))) {
+                Map<URI, String> rewrittenSources = new LinkedHashMap<>();
+                results.forEach((uri, result) -> rewrittenSources.put(uri, result.source()));
+                Map<URI, RewriteResult> shortened = rewrite(rewrittenSources, compilerOptions, false);
+                results
+                    .replaceAll((uri, result) -> new RewriteResult(shortened.get(uri).source(), result.changedLines(),
+                        result.visibilityViolations(), result.varViolations()));
+            }
+
+            return results;
+        } catch (IOException exception) {
+            throw new IllegalStateException("Unable to parse Java sources", exception);
+        }
+    }
+
+    private static List<Path> collectJavaFiles(String[] args, int pathStart) throws IOException {
+        List<Path> files = new ArrayList<>();
+        for (int index = pathStart; index < args.length; index++) {
+            Path path = Path.of(args[index]);
+            if (Files.isDirectory(path)) {
+                try (Stream<Path> paths = Files.walk(path)) {
+                    paths.filter(Files::isRegularFile)
+                        .filter(candidate -> candidate.getFileName().toString().endsWith(".java"))
+                        .forEach(files::add);
+                }
+            } else if (path.getFileName().toString().endsWith(".java")) {
+                files.add(path);
+            }
+        }
+
+        files.sort(Comparator.comparing(Path::toString));
+        return files;
+    }
+
+    private static List<Path> retainChangedFiles(List<Path> candidates, Path repository, String revision)
+        throws IOException {
+        Set<Path> changed = new HashSet<>();
+        changed.addAll(
+            gitPaths(repository, "diff", "--relative", "--name-only", "-z", "--diff-filter=ACMRTUXB", revision, "--"));
+        changed.addAll(gitPaths(repository, "ls-files", "-z", "--others", "--exclude-standard", "--"));
+
+        return candidates.stream()
+            .map(Path::toAbsolutePath)
+            .map(Path::normalize)
+            .filter(changed::contains)
+            .toList();
+    }
+
+    private static List<Path> gitPaths(Path repository, String... arguments) throws IOException {
+        List<String> command = new ArrayList<>(List.of("git", "-C", repository.toString()));
+        command.addAll(Arrays.asList(arguments));
+
+        Process process = new ProcessBuilder(command).start();
+        String output;
+        try {
+            output = new String(process.getInputStream().readAllBytes(), StandardCharsets.UTF_8);
+            int exitCode = process.waitFor();
+            if (exitCode != 0) {
+                var error = new String(process.getErrorStream().readAllBytes(), StandardCharsets.UTF_8);
+                throw new IOException("Git command failed (" + String.join(" ", command) + "):\n" + error);
+            }
+        } catch (InterruptedException exception) {
+            Thread.currentThread().interrupt();
+            throw new IOException("Interrupted while determining changed Java files", exception);
+        }
+
+        return Arrays.stream(output.split("\u0000"))
+            .filter(line -> !line.isBlank())
+            .map(repository::resolve)
+            .map(Path::toAbsolutePath)
+            .map(Path::normalize)
+            .toList();
+    }
+
+    private static void failOnParseErrors(DiagnosticCollector<JavaFileObject> diagnostics) {
+        List<String> errors = diagnostics.getDiagnostics().stream()
+            .filter(diagnostic -> diagnostic.getKind() == Diagnostic.Kind.ERROR)
+            .map(diagnostic -> diagnostic.getSource().toUri() + ":" + diagnostic.getLineNumber() + ": "
+                + diagnostic.getMessage(Locale.ROOT))
+            .toList();
+        if (!errors.isEmpty())
+            throw new IllegalArgumentException("Java formatter could not parse source:\n" + String.join("\n", errors));
+    }
+
+    private record RewriteResult(
+        String source,
+        List<Integer> changedLines,
+        List<ExplicitVisibilityStyle.Violation> visibilityViolations,
+        List<LocalVariableStyle.Violation> varViolations
+    ) {
+    }
+
+    public record TextEdit(int start, int end, String replacement) {
+    }
+
+    private static final class SourceFile extends SimpleJavaFileObject {
+        private final String source;
+
+        private SourceFile(URI uri, String source) {
+            super(uri, Kind.SOURCE);
+            this.source = source;
+        }
+
+        @Override
+        public CharSequence getCharContent(boolean ignoreEncodingErrors) {
+            return source;
+        }
+
+        @Override
+        public boolean isNameCompatible(String simpleName, Kind kind) {
+            // The string API has no filename; do not let its placeholder suppress compiler analysis.
+            return (toUri().getScheme().equals("string") && kind == Kind.SOURCE)
+                || super.isNameCompatible(simpleName, kind);
+        }
+    }
+
+    private static final class SemanticStyleScanner extends TreePathScanner<Void, Void> {
+        private final CompilationUnitTree unit;
+        private final SourcePositions positions;
+        private final String source;
+        private final List<TextEdit> edits;
+        private final List<Integer> changedLines;
+
+        private SemanticStyleScanner(
+            CompilationUnitTree unit,
+            SourcePositions positions,
+            String source,
+            List<TextEdit> edits,
+            List<Integer> changedLines
+        ) {
+            this.unit = unit;
+            this.positions = positions;
+            this.source = source;
+            this.edits = edits;
+            this.changedLines = changedLines;
+        }
+
+        @Override
+        public Void visitIf(IfTree tree, Void unused) {
+            inspect(tree.getThenStatement(), false);
+            inspect(tree.getElseStatement(), true);
+            return super.visitIf(tree, unused);
+        }
+
+        @Override
+        public Void visitForLoop(ForLoopTree tree, Void unused) {
+            inspect(tree.getStatement(), false);
+            return super.visitForLoop(tree, unused);
+        }
+
+        @Override
+        public Void visitEnhancedForLoop(EnhancedForLoopTree tree, Void unused) {
+            inspect(tree.getStatement(), false);
+            return super.visitEnhancedForLoop(tree, unused);
+        }
+
+        @Override
+        public Void visitWhileLoop(WhileLoopTree tree, Void unused) {
+            inspect(tree.getStatement(), false);
+            return super.visitWhileLoop(tree, unused);
+        }
+
+        @Override
+        public Void visitDoWhileLoop(DoWhileLoopTree tree, Void unused) {
+            inspect(tree.getStatement(), false);
+            return super.visitDoWhileLoop(tree, unused);
+        }
+
+        @Override
+        public Void visitVariable(VariableTree tree, Void unused) {
+            int release = Integer.parseInt(
+                System.getProperty("railroad.quality.release", Integer.toString(Runtime.version().feature())));
+            if (release >= 22) {
+                replaceConventionalUnusedName(tree);
+            }
+
+            return super.visitVariable(tree, unused);
+        }
+
+        private void replaceConventionalUnusedName(VariableTree variable) {
+            String name = variable.getName().toString();
+            if (!isConventionalUnusedName(name))
+                return;
+
+            List<? extends Tree> scope = unnamedVariableScope(variable);
+            if (scope == null || containsIdentifier(scope, name))
+                return;
+
+            TextRange nameRange = findVariableName(variable, name);
+            if (nameRange == null)
+                return;
+
+            edits.add(new TextEdit(nameRange.start(), nameRange.end(), "_"));
+            changedLines.add(Math.toIntExact(unit.getLineMap().getLineNumber(nameRange.start())));
+        }
+
+        private List<? extends Tree> unnamedVariableScope(VariableTree variable) {
+            Tree parent = getCurrentPath().getParentPath().getLeaf();
+            if (parent instanceof BlockTree block) {
+                if (variable.getInitializer() == null || !isLocalVariableStatement(variable, block))
+                    return null;
+
+                List<? extends StatementTree> statements = block.getStatements();
+                for (int index = 0; index < statements.size(); index++) {
+                    if (statements.get(index) == variable)
+                        return statements.subList(index + 1, statements.size());
+                }
+
+                return null;
+            }
+
+            if (parent instanceof ForLoopTree loop) {
+                if (loop.getInitializer().size() != 1 || loop.getInitializer().getFirst() != variable)
+                    return null;
+
+                List<Tree> scope = new ArrayList<>();
+                if (loop.getCondition() != null) {
+                    scope.add(loop.getCondition());
+                }
+
+                scope.addAll(loop.getUpdate());
+                scope.add(loop.getStatement());
+                return scope;
+            }
+
+            if (parent instanceof EnhancedForLoopTree loop && loop.getVariable() == variable)
+                return List.of(loop.getStatement());
+
+            if (parent instanceof CatchTree catchTree && catchTree.getParameter() == variable)
+                return List.of(catchTree.getBlock());
+
+            if (parent instanceof LambdaExpressionTree lambda && lambda.getParameters().stream()
+                .anyMatch(parameter -> parameter == variable))
+                return List.of(lambda.getBody());
+
+            if (parent instanceof TryTree tryTree && tryTree.getResources().stream()
+                .anyMatch(resource -> resource == variable))
+                return List.of(tryTree);
+
+            return null;
+        }
+
+        private TextRange findVariableName(VariableTree variable, String name) {
+            int searchStart = variable.getType() == null ? startOf(variable) : endOf(variable.getType());
+            int searchEnd = variable.getInitializer() == null
+                ? endOf(variable)
+                : startOf(variable.getInitializer());
+            if (searchStart < 0 || searchEnd <= searchStart)
+                return null;
+
+            for (int offset = searchStart; offset < searchEnd;) {
+                int codePoint = source.codePointAt(offset);
+                if (!Character.isJavaIdentifierStart(codePoint)) {
+                    offset += Character.charCount(codePoint);
+                    continue;
+                }
+
+                int identifierEnd = offset + Character.charCount(codePoint);
+                while (identifierEnd < searchEnd) {
+                    int next = source.codePointAt(identifierEnd);
+                    if (!Character.isJavaIdentifierPart(next))
+                        break;
+
+                    identifierEnd += Character.charCount(next);
+                }
+
+                if (source.regionMatches(offset, name, 0, name.length()) && identifierEnd - offset == name.length())
+                    return new TextRange(offset, identifierEnd);
+
+                offset = identifierEnd;
+            }
+
+            return null;
+        }
+
+        private static boolean containsIdentifier(List<? extends Tree> trees, String name) {
+            var scanner = new IdentifierUsageScanner(name);
+            for (Tree tree : trees) {
+                if (tree != null) {
+                    scanner.scan(tree, null);
+                }
+            }
+
+            return scanner.found;
+        }
+
+        private static boolean isConventionalUnusedName(String name) {
+            if (name.equals("ignored"))
+                return true;
+
+            if (name.isEmpty() || name.charAt(0) != '$')
+                return false;
+
+            return name.substring(1).chars().allMatch(Character::isDigit);
+        }
+
+        private boolean isLocalVariableStatement(VariableTree variable, Tree parent) {
+            if (parent instanceof BlockTree block) {
+                long declaredTypeStart = positions.getStartPosition(unit, variable.getType());
+                long variablesWithSameTypeStart = block.getStatements().stream()
+                    .filter(VariableTree.class::isInstance)
+                    .map(VariableTree.class::cast)
+                    .filter(candidate -> positions.getStartPosition(unit, candidate.getType()) == declaredTypeStart)
+                    .count();
+                return variablesWithSameTypeStart == 1;
+            }
+
+            if (parent instanceof ForLoopTree loop)
+                return loop.getInitializer().size() == 1 && loop.getInitializer().getFirst() == variable;
+
+            return false;
+        }
+
+        private boolean followedByComma(int offset) {
+            while (offset < source.length() && Character.isWhitespace(source.charAt(offset))) {
+                offset++;
+            }
+
+            return offset < source.length() && source.charAt(offset) == ',';
+        }
+
+        private int startOf(Tree tree) {
+            return Math.toIntExact(positions.getStartPosition(unit, tree));
+        }
+
+        private int endOf(Tree tree) {
+            return Math.toIntExact(positions.getEndPosition(unit, tree));
+        }
+
+        private void inspect(StatementTree statement, boolean allowElseIf) {
+            if (statement == null)
+                return;
+
+            if (statement instanceof BlockTree block) {
+                if (block.getStatements().size() == 1 && isTerminal(block.getStatements().getFirst().getKind())) {
+                    removeOptionalBraces(block);
+                }
+
+                return;
+            }
+
+            if (isTerminal(statement.getKind()) || (allowElseIf && statement.getKind() == Tree.Kind.IF))
+                return;
+
+            addRequiredBraces(statement);
+        }
+
+        private void removeOptionalBraces(BlockTree block) {
+            int start = Math.toIntExact(positions.getStartPosition(unit, block));
+            int end = Math.toIntExact(positions.getEndPosition(unit, block));
+            if (start < 0 || end <= start || source.charAt(start) != '{' || source.charAt(end - 1) != '}')
+                throw new IllegalStateException("javac returned unexpected source positions for a block");
+
+            edits.add(closingBraceEdit(end - 1));
+            edits.add(openingBraceEdit(start));
+            changedLines.add(Math.toIntExact(unit.getLineMap().getLineNumber(start)));
+        }
+
+        private void addRequiredBraces(StatementTree statement) {
+            int start = Math.toIntExact(positions.getStartPosition(unit, statement));
+            int end = Math.toIntExact(positions.getEndPosition(unit, statement));
+            if (start < 0 || end <= start)
+                throw new IllegalStateException("javac returned unexpected source positions for a statement");
+
+            edits.add(new TextEdit(end, end, "\n}"));
+            edits.add(new TextEdit(start, start, "{\n"));
+            changedLines.add(Math.toIntExact(unit.getLineMap().getLineNumber(start)));
+        }
+
+        private TextEdit openingBraceEdit(int brace) {
+            int editStart = brace;
+            while (editStart > 0 && isHorizontalWhitespace(source.charAt(editStart - 1))) {
+                editStart--;
+            }
+
+            return new TextEdit(editStart, brace + 1, "");
+        }
+
+        private TextEdit closingBraceEdit(int brace) {
+            int lineStart = brace;
+            while (lineStart > 0 && isHorizontalWhitespace(source.charAt(lineStart - 1))) {
+                lineStart--;
+            }
+
+            boolean braceIsFirstTokenOnLine = lineStart == 0
+                || source.charAt(lineStart - 1) == '\n'
+                || source.charAt(lineStart - 1) == '\r';
+            if (!braceIsFirstTokenOnLine) {
+                int editStart = brace;
+                while (editStart > 0 && isHorizontalWhitespace(source.charAt(editStart - 1))) {
+                    editStart--;
+                }
+
+                return new TextEdit(editStart, brace + 1, "");
+            }
+
+            int editEnd = brace + 1;
+            while (editEnd < source.length() && isHorizontalWhitespace(source.charAt(editEnd))) {
+                editEnd++;
+            }
+
+            if (editEnd >= source.length()
+                || (source.charAt(editEnd) != '\r' && source.charAt(editEnd) != '\n'))
+                return new TextEdit(brace, editEnd, "");
+
+            if (editEnd < source.length() && source.charAt(editEnd) == '\r') {
+                editEnd++;
+            }
+
+            if (editEnd < source.length() && source.charAt(editEnd) == '\n') {
+                editEnd++;
+            }
+
+            return new TextEdit(lineStart, editEnd, "");
+        }
+
+        private static boolean isHorizontalWhitespace(char character) {
+            return character == ' ' || character == '\t';
+        }
+
+        private static boolean isTerminal(Tree.Kind kind) {
+            return kind == Tree.Kind.RETURN
+                || kind == Tree.Kind.THROW
+                || kind == Tree.Kind.BREAK
+                || kind == Tree.Kind.CONTINUE
+                || kind == Tree.Kind.YIELD;
+        }
+
+        private static final class IdentifierUsageScanner extends TreeScanner<Void, Void> {
+            private final String name;
+            private boolean found;
+
+            private IdentifierUsageScanner(String name) {
+                this.name = name;
+            }
+
+            @Override
+            public Void visitIdentifier(IdentifierTree tree, Void unused) {
+                if (tree.getName().contentEquals(name)) {
+                    found = true;
+                }
+
+                return null;
+            }
+        }
+    }
+
+    private record TextRange(int start, int end) {
+    }
+}

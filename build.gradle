@@ -1,0 +1,60 @@
+plugins {
+    id 'groovy'
+    id 'java-gradle-plugin'
+    id 'maven-publish'
+}
+
+group = 'dev.railroadide'
+version = '1.0.0'
+
+repositories {
+    mavenCentral()
+    gradlePluginPortal()
+}
+
+java {
+    withSourcesJar()
+    toolchain.languageVersion = JavaLanguageVersion.of(25)
+    sourceCompatibility = JavaVersion.VERSION_21
+    targetCompatibility = JavaVersion.VERSION_21
+}
+tasks.withType(JavaCompile).configureEach {
+    options.release = 21
+    options.encoding = 'UTF-8'
+}
+
+dependencies {
+    implementation 'com.diffplug.spotless:spotless-plugin-gradle:8.10.0'
+    implementation 'org.freemarker:freemarker:2.3.35'
+    testImplementation gradleTestKit()
+    testImplementation 'org.junit.jupiter:junit-jupiter:6.0.0'
+    testRuntimeOnly 'org.junit.platform:junit-platform-launcher:6.0.0'
+}
+
+gradlePlugin {
+    plugins {
+        railroadQuality {
+            id = 'dev.railroadide.quality'
+            implementationClass = 'dev.railroadide.quality.RailroadQualityPlugin'
+            displayName = 'Railroad Java quality tools'
+            description = 'Syntax-aware Java formatting and searchable public API Javadoc coverage.'
+        }
+    }
+}
+
+tasks.named('test') {
+    useJUnitPlatform()
+}
+
+publishing {
+    repositories {
+        maven {
+            name = 'railroad'
+            url = uri('https://maven.railroadide.dev/releases')
+            credentials {
+                username = providers.environmentVariable('RAILROAD_MAVEN_USERNAME').orNull
+                password = providers.environmentVariable('RAILROAD_MAVEN_PASSWORD').orNull
+            }
+        }
+    }
+}
