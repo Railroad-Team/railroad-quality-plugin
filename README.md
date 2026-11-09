@@ -22,7 +22,7 @@ In its `build.gradle`:
 
 ```groovy
 plugins {
-    id 'dev.railroadide.quality' version '1.0.0'
+    id 'dev.railroadide.quality' version '1.1.0'
 }
 repositories {
     mavenCentral() // Spotless downloads its formatter engines here.
@@ -30,7 +30,7 @@ repositories {
 ```
 
 For Kotlin DSL, use `maven { url = uri("https://maven.railroadide.dev/releases") }`
-in `pluginManagement.repositories` and `id("dev.railroadide.quality") version "1.0.0"` in `plugins`.
+in `pluginManagement.repositories` and `id("dev.railroadide.quality") version "1.1.0"` in `plugins`.
 Apply the plugin in each Java subproject that needs these tools.
 
 ## Tasks
@@ -150,6 +150,6 @@ pluginManagement {
 }
 ```
 
-Then use `id 'dev.railroadide.quality' version '1.0.0'` in the consumer build.
+Then use `id 'dev.railroadide.quality' version '1.1.0'` in the consumer build.
 
 The extracted code retains Railroad's GPL-3.0-or-later license; see LICENSE.
