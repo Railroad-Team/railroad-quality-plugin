@@ -112,7 +112,9 @@ public final class QualifiedNameStyle extends TreePathScanner<Void, Void> {
             if (!(element instanceof TypeElement type) || type.asType().getKind() == TypeKind.ERROR)
                 continue;
 
-            boolean visible = hasSameVisibleType(path, type, elements) && !hasGenericEnclosingInstance(type);
+            boolean visible = !hasGenericEnclosingInstance(type)
+                && (!(type.getEnclosingElement() instanceof TypeElement) || !isInClassHeader(path))
+                && hasSameVisibleType(path, type, elements);
             if (!visible
                 && !(trees.getElement(new TreePath(path, select.getExpression())) instanceof PackageElement))
                 continue;
@@ -169,6 +171,15 @@ public final class QualifiedNameStyle extends TreePathScanner<Void, Void> {
         if (!addedImports.isEmpty()) {
             addImports(addedImports, edits);
         }
+    }
+
+    private static boolean isInClassHeader(TreePath path) {
+        for (TreePath child = path; child.getParentPath() != null; child = child.getParentPath()) {
+            if (child.getParentPath().getLeaf() instanceof ClassTree declaration)
+                return !declaration.getMembers().contains(child.getLeaf());
+        }
+
+        return false;
     }
 
     // Reusing a name already bound to this exact type needs no import and cannot change other scopes.

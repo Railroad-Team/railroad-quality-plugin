@@ -14,6 +14,7 @@ public final class ClosingBraceSpacing {
         boolean afterSemicolon = false;
         boolean afterClosingDelimiter = false;
         boolean disabled = false;
+        boolean afterTypeKeyword = false;
         for (int offset = 0; offset < source.length();) {
             int start = offset;
             char current = source.charAt(offset);
@@ -23,7 +24,11 @@ public final class ClosingBraceSpacing {
                 }
 
                 String gap = source.substring(start, offset);
-                if (afterBrace && afterClosingDelimiter && !afterSemicolon && !disabled
+                if (afterTypeKeyword && !disabled && gap.indexOf('\n') >= 0 && offset < source.length()
+                    && (Character.isJavaIdentifierStart(source.codePointAt(offset)) || source.charAt(offset) == '@')
+                    && fitsOnCurrentLine(result, source, offset)) {
+                    gap = " ";
+                } else if (afterBrace && afterClosingDelimiter && !afterSemicolon && !disabled
                     && offset < source.length() && source.charAt(offset) == '{') {
                     // Keep a condition's body attached, including repairing gaps from older formatter runs.
                     gap = " ";
@@ -47,6 +52,7 @@ public final class ClosingBraceSpacing {
                 continue;
             }
 
+            afterTypeKeyword = false;
             if (source.startsWith("//", offset) || source.startsWith("/*", offset)) {
                 if (source.startsWith("//", offset)) {
                     int end = source.indexOf('\n', offset + 2);
@@ -104,11 +110,30 @@ public final class ClosingBraceSpacing {
                 afterClosingDelimiter = false;
             }
 
-            result.append(current);
-            offset++;
+            if (Character.isJavaIdentifierPart(source.codePointAt(offset))) {
+                do {
+                    offset += Character.charCount(source.codePointAt(offset));
+                } while (offset < source.length() && Character.isJavaIdentifierPart(source.codePointAt(offset)));
+                afterTypeKeyword = (offset - start == 7 && source.startsWith("extends", start))
+                    || (offset - start == 10 && source.startsWith("implements", start));
+                result.append(source, start, offset);
+            } else {
+                result.append(current);
+                offset++;
+            }
         }
 
         return result.toString();
+    }
+
+    private static boolean fitsOnCurrentLine(StringBuilder result, String source, int offset) {
+        int end = source.indexOf('\n', offset);
+        if (end < 0)
+            end = source.length();
+        if (end > offset && source.charAt(end - 1) == '\r')
+            end--;
+
+        return result.length() - result.lastIndexOf("\n") + end - offset <= 120;
     }
 
     private static boolean isContinuation(String source, int offset, boolean sameLine) {

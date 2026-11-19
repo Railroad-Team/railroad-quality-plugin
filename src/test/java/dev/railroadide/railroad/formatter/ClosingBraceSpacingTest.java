@@ -6,6 +6,22 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 
 public class ClosingBraceSpacingTest {
     @Test
+    public void joinsWrappedInheritanceKeywordsWithinTheLineLimit() {
+        assertFormat("class Child extends\r\n    Parent {\r\n}\r\n",
+            "class Child extends Parent {\r\n}\r\n");
+        String prefix = "    implements ";
+        String names = "I".repeat(119 - prefix.length()) + ",";
+        assertFormat(prefix.stripTrailing() + "\n        " + names + "\n        Other",
+            prefix + names + "\n        Other");
+        String tooWide = prefix.stripTrailing() + "\n        X" + names;
+        assertFormat(tooWide, tooWide);
+        String comment = "class Child extends // reason\n    Parent {}";
+        assertFormat(comment, comment);
+        String disabled = "// @formatter:off\nclass Child extends\n    Parent {}";
+        assertFormat(disabled, disabled);
+    }
+
+    @Test
     public void separatesFollowingCodeAndRemovesBlankLinesBetweenClosingBraces() {
         assertFormat("if (ready) {\n    work();\n}\nnext();\n",
             "if (ready) {\n    work();\n}\n\nnext();\n");

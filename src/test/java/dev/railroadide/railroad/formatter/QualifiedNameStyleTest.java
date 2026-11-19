@@ -11,6 +11,19 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 
 public class QualifiedNameStyleTest {
     @Test
+    public void keepsMemberQualificationInClassHeader(@TempDir Path directory) throws Exception {
+        String source = """
+            package example;
+
+            interface Handler<T> {}
+            public class Example implements Handler<Example.Item> {
+                public class Item {}
+            }
+            """;
+        assertRewrite(source, source, directory);
+    }
+
+    @Test
     public void shortensOwnNestedTypesInExplicitAndInferredCollections(@TempDir Path directory) throws Exception {
         assertRewrite("""
             package example;
