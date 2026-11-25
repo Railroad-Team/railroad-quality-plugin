@@ -22,7 +22,7 @@ In its `build.gradle`:
 
 ```groovy
 plugins {
-    id 'dev.railroadide.quality' version '1.1.3'
+    id 'dev.railroadide.quality' version '1.1.4'
 }
 repositories {
     mavenCentral() // Spotless downloads its formatter engines here.
@@ -30,7 +30,7 @@ repositories {
 ```
 
 For Kotlin DSL, use `maven { url = uri("https://maven.railroadide.dev/releases") }`
-in `pluginManagement.repositories` and `id("dev.railroadide.quality") version "1.1.3"` in `plugins`.
+in `pluginManagement.repositories` and `id("dev.railroadide.quality") version "1.1.4"` in `plugins`.
 Apply the plugin in each Java subproject that needs these tools.
 
 ## Tasks
@@ -105,6 +105,8 @@ and queue collections use interfaces such as `NavigableMap`, `ConcurrentMap`,
 and `Deque`. Generic arguments and constructors are preserved. Concrete types
 remain when implementation-specific methods, overloads, assignments, or return
 types require them. Public API types and record components are left unchanged.
+Private fields also keep their declared types when the field or its declaring class has an annotation,
+since generated methods such as Lombok getters can expose those types.
 
 Redundant constructor type arguments are replaced with `<>` when javac confirms
 the same inferred arguments, for example `ArrayList<TypeCoverage> classes = new
@@ -150,6 +152,6 @@ pluginManagement {
 }
 ```
 
-Then use `id 'dev.railroadide.quality' version '1.1.3'` in the consumer build.
+Then use `id 'dev.railroadide.quality' version '1.1.4'` in the consumer build.
 
 The extracted code retains Railroad's GPL-3.0-or-later license; see LICENSE.

@@ -13,6 +13,31 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 public class CollectionTypeStyleTest {
     @Test
+    public void preservesFieldTypesExposedToAnnotationProcessors(@TempDir Path directory) throws Exception {
+        String after = rewrite("""
+            import java.util.*;
+
+            @interface GenerateAccessors {}
+            class Contact extends HashMap<String, String> {}
+
+            @GenerateAccessors
+            class Model {
+                private Contact contact;
+                public void clear() { contact.clear(); }
+            }
+            public class Example {
+                @GenerateAccessors private Contact annotated;
+                private HashMap<String, String> plain;
+                public void run() {
+                    HashMap<String, String> local = new HashMap<>();
+                }
+            }
+            """, directory);
+        assertContains(after, "private Contact contact;", "@GenerateAccessors private Contact annotated;",
+            "private Map<String, String> plain;", "Map<String, String> local = new HashMap<>();");
+    }
+
+    @Test
     public void usesListSetMapAndSpecializedCollectionInterfaces(@TempDir Path directory) throws Exception {
         String after = rewrite("""
             import java.util.*;

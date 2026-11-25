@@ -109,6 +109,10 @@ public final class CollectionTypeStyle extends TreePathScanner<Void, Void> {
             siblings = caseTree.getStatements();
         } else if (parent instanceof ClassTree owner && variable.getModifiers().getFlags().contains(Modifier.PRIVATE)
             && (owner.getKind() != Tree.Kind.RECORD || variable.getModifiers().getFlags().contains(Modifier.STATIC))) {
+            // Annotation processing is disabled here. Generated accessors and constructors can expose the field type.
+            if (!owner.getModifiers().getAnnotations().isEmpty() || !variable.getModifiers().getAnnotations().isEmpty())
+                return super.visitVariable(variable, unused);
+
             siblings = owner.getMembers();
         } else if (parent instanceof EnhancedForLoopTree) {
             siblings = List.of(variable);
