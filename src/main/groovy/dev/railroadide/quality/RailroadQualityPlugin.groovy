@@ -3,6 +3,7 @@ package dev.railroadide.quality
 import com.diffplug.gradle.spotless.SpotlessExtension
 import dev.railroadide.railroad.formatter.RailroadJavaStyle
 import dev.railroadide.railroad.formatter.ClosingBraceSpacing
+import dev.railroadide.railroad.formatter.DeclarationListWrapping
 import dev.railroadide.railroad.formatter.SingleLineJavadocStyle
 import dev.railroadide.railroad.docs.JavadocCoverage
 import freemarker.template.Configuration
@@ -75,6 +76,9 @@ class RailroadQualityPlugin implements Plugin<Project> {
                 target(extension.javaSources)
                 custom('multilineJavadoc') { source ->
                     SingleLineJavadocStyle.format(source)
+                }
+                custom('declarationListWrapping') { source ->
+                    DeclarationListWrapping.prepare(source)
                 }
                 eclipse().configFile(configDirectory.get().file('railroad-eclipse-formatter.xml').asFile)
                 custom('closingBraceSpacing') { source ->

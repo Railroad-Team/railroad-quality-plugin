@@ -17,27 +17,28 @@ public final class SourceFormatting {
                 continue;
             }
 
-            if (source.startsWith("//", offset)) {
-                int end = source.indexOf('\n', offset + 2);
-                offset = end < 0 ? source.length() : end;
-            } else if (source.startsWith("/*", offset)) {
-                int end = source.indexOf("*/", offset + 2);
-                offset = end < 0 ? source.length() : end + 2;
-            } else {
+            if (!source.startsWith("//", offset) && !source.startsWith("/*", offset)) {
                 offset++;
                 continue;
             }
 
-            String comment = source.substring(start, offset);
-            if (comment.contains("@formatter:off")) {
-                enabled = false;
-            }
-
-            if (comment.contains("@formatter:on")) {
-                enabled = true;
-            }
+            offset = endOfComment(source, start);
+            enabled = formatterEnabled(source.substring(start, offset), enabled);
         }
 
         return enabled;
+    }
+
+    static int endOfComment(String source, int start) {
+        if (source.startsWith("//", start)) {
+            int end = source.indexOf('\n', start + 2);
+            return end < 0 ? source.length() : end;
+        }
+        int end = source.indexOf("*/", start + 2);
+        return end < 0 ? source.length() : end + 2;
+    }
+
+    static boolean formatterEnabled(String comment, boolean previouslyEnabled) {
+        return comment.contains("@formatter:on") || (previouslyEnabled && !comment.contains("@formatter:off"));
     }
 }

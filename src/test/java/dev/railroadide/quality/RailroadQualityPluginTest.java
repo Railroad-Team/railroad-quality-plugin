@@ -83,6 +83,60 @@ public class RailroadQualityPluginTest {
     }
 
     @Test
+    public void packsDeclarationListsWithinTheLineLimit() throws Exception {
+        Files.writeString(project.resolve("settings.gradle"), "rootProject.name = 'declaration-wrapping'\n");
+        Files.writeString(project.resolve("build.gradle"), """
+            plugins { id 'dev.railroadide.quality' }
+            repositories { mavenCentral() }
+            """);
+        Path source = project.resolve("src/main/java/Types.java");
+        Files.createDirectories(source.getParent());
+        Files.writeString(source, """
+            interface A {}
+            interface B {}
+            interface C {}
+            interface Combined extends A,
+                B,
+                C {}
+            sealed interface Shape
+                permits Circle,
+                    Square {}
+            record Circle() implements Shape,
+                A, B {}
+            final class Square extends
+                Object
+                implements Shape, A,
+                B {}
+            enum Kind implements A,
+                B, C { ONE }
+            class Example {
+                void read() throws IllegalArgumentException,
+                    IllegalStateException {}
+            }
+            interface LongDeclarationNameThatLeavesRoomForOnlySomeOfTheInterfacesOnItsFirstLine
+                extends FirstLongInterfaceName,
+                    SecondLongInterfaceName,
+                    ThirdLongInterfaceName,
+                    FourthLongInterfaceName {}
+            """);
+        runner("spotlessJavaApply").build();
+        String formatted = Files.readString(source).replace("\r\n", "\n");
+        for (String header : new String[] {
+            "interface Combined extends A, B, C {",
+            "sealed interface Shape permits Circle, Square {",
+            "record Circle() implements Shape, A, B {",
+            "final class Square extends Object implements Shape, A, B {",
+            "enum Kind implements A, B, C {",
+            "void read() throws IllegalArgumentException, IllegalStateException {"
+        }) {
+            assertTrue(formatted.contains(header), formatted);
+        }
+        assertTrue(formatted.contains("ThirdLongInterfaceName, FourthLongInterfaceName {"), formatted);
+        assertTrue(formatted.lines().allMatch(line -> line.length() <= 120), formatted);
+        runner("spotlessJavaCheck").build();
+    }
+
+    @Test
     public void separatesCompletedBlocksWithoutBlankLinesBetweenClosingBraces() throws Exception {
         Files.writeString(project.resolve("settings.gradle"), "rootProject.name = 'brace-spacing'\n");
         Files.writeString(project.resolve("build.gradle"), """
