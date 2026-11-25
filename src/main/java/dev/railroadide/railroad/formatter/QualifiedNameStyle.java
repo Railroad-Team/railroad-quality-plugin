@@ -112,9 +112,9 @@ public final class QualifiedNameStyle extends TreePathScanner<Void, Void> {
             if (!(element instanceof TypeElement type) || type.asType().getKind() == TypeKind.ERROR)
                 continue;
 
-            boolean visible = !hasGenericEnclosingInstance(type)
-                && (!(type.getEnclosingElement() instanceof TypeElement) || !isInClassHeader(path))
-                && hasSameVisibleType(path, type, elements);
+            NameBinding binding = simpleNameBinding(path, type, elements);
+            boolean visible = binding == NameBinding.TARGET && !hasGenericEnclosingInstance(type)
+                && (!(type.getEnclosingElement() instanceof TypeElement) || !isInClassHeader(path));
             if (!visible
                 && !(trees.getElement(new TreePath(path, select.getExpression())) instanceof PackageElement))
                 continue;
@@ -123,9 +123,11 @@ public final class QualifiedNameStyle extends TreePathScanner<Void, Void> {
                 visibleTypes.add(path);
             }
 
-            resolved.put(path, type);
             qualifiedTypes.computeIfAbsent(type.getSimpleName().toString(), unused -> new HashSet<>())
                 .add(type.getQualifiedName().toString());
+            if (binding != NameBinding.CONFLICT) {
+                resolved.put(path, type);
+            }
         }
 
         Set<String> addedImports = new TreeSet<>();
@@ -141,8 +143,7 @@ public final class QualifiedNameStyle extends TreePathScanner<Void, Void> {
             if (!visible && (declarations.contains(simple)
                 || (existingImport != null && !existingImport.equals(qualified))
                 || (existingImport == null && qualifiedTypes.get(simple).size() > 1)
-                || hasConflictingIdentifier(simple, type)
-                || hasScopeConflict(path, type, elements)))
+                || hasConflictingIdentifier(simple, type)))
                 continue;
 
             int start = Math.toIntExact(trees.getSourcePositions().getStartPosition(unit, path.getLeaf()));
@@ -182,9 +183,13 @@ public final class QualifiedNameStyle extends TreePathScanner<Void, Void> {
         return false;
     }
 
-    // Reusing a name already bound to this exact type needs no import and cannot change other scopes.
+    private enum NameBinding {
+        TARGET,
+        CONFLICT,
+        UNBOUND
+    }
 
-    private boolean hasSameVisibleType(TreePath path, TypeElement type, Elements elements) {
+    private NameBinding simpleNameBinding(TreePath path, TypeElement type, Elements elements) {
         String name = type.getSimpleName().toString();
         for (Scope scope = trees.getScope(path); scope != null; scope = scope.getEnclosingScope()) {
             Set<Element> matches = new HashSet<>();
@@ -195,18 +200,25 @@ public final class QualifiedNameStyle extends TreePathScanner<Void, Void> {
             }
 
             if (!matches.isEmpty())
-                return matches.size() == 1 && matches.contains(type);
+                return matches.size() == 1 && matches.contains(type) ? NameBinding.TARGET : NameBinding.CONFLICT;
 
             TypeElement enclosingClass = scope.getEnclosingClass();
-            if (enclosingClass == null)
+            if (enclosingClass == null) {
+                // Javac exposes named imports here, then wildcard imports in the outer scope.
+                // Types in sibling files of this package take precedence over those wildcard imports.
+                String qualified = unit.getPackageName() == null ? name : unit.getPackageName() + "." + name;
+                TypeElement sibling = elements.getTypeElement(qualified);
+                if (sibling != null)
+                    return sibling.equals(type) ? NameBinding.TARGET : NameBinding.CONFLICT;
                 continue;
+            }
 
             if (enclosingClass.equals(type))
-                return true;
+                return NameBinding.TARGET;
 
             if (enclosingClass.getSuperclass().getKind() == TypeKind.ERROR
                 || enclosingClass.getInterfaces().stream().anyMatch(parent -> parent.getKind() == TypeKind.ERROR))
-                return false;
+                return NameBinding.CONFLICT;
 
             for (Element member : elements.getAllMembers(enclosingClass)) {
                 if ((member instanceof TypeElement || member.getKind().isField())
@@ -216,10 +228,10 @@ public final class QualifiedNameStyle extends TreePathScanner<Void, Void> {
             }
 
             if (!matches.isEmpty())
-                return matches.size() == 1 && matches.contains(type);
+                return matches.size() == 1 && matches.contains(type) ? NameBinding.TARGET : NameBinding.CONFLICT;
         }
 
-        return false;
+        return NameBinding.UNBOUND;
     }
 
     // Outer<String>.Inner and Outer<Integer>.Inner must not both collapse to Inner.
@@ -240,33 +252,6 @@ public final class QualifiedNameStyle extends TreePathScanner<Void, Void> {
         for (TreePath identifier : identifiers.getOrDefault(name, List.of())) {
             if (!type.equals(trees.getElement(identifier)))
                 return true;
-        }
-
-        return false;
-    }
-
-    private boolean hasScopeConflict(TreePath path, TypeElement type, Elements elements) {
-        String name = type.getSimpleName().toString();
-        for (Scope scope = trees.getScope(path); scope != null; scope = scope.getEnclosingScope()) {
-            for (Element local : scope.getLocalElements()) {
-                if (local.getSimpleName().contentEquals(name) && !local.equals(type))
-                    return true;
-            }
-
-            TypeElement enclosingClass = scope.getEnclosingClass();
-            if (enclosingClass == null)
-                continue;
-
-            // An unresolved parent may contribute an unknown member with the same name.
-            if (enclosingClass.getSuperclass().getKind() == TypeKind.ERROR
-                || enclosingClass.getInterfaces().stream().anyMatch(parent -> parent.getKind() == TypeKind.ERROR))
-                return true;
-
-            for (Element member : elements.getAllMembers(enclosingClass)) {
-                if ((member instanceof TypeElement || member.getKind().isField())
-                    && member.getSimpleName().contentEquals(name) && !member.equals(type))
-                    return true;
-            }
         }
 
         return false;
